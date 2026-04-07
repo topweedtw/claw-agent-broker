@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Node / TypeScript
+**/node_modules/
+**/dist/
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*

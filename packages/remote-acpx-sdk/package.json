@@ -1,0 +1,19 @@
+{
+  "name": "@claw-agent-broker/remote-acpx-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared protocol and transport helpers for remote ACP session events.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run build && node --test test/**/*.test.cjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
