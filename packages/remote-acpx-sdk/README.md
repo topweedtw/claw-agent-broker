@@ -10,6 +10,7 @@ This package provides:
 - JSON serialize/parse helpers
 - runtime validation and type guards
 - a thin client wrapper for event transport
+- request correlation helpers for pairing outbound requests with streamed responses
 
 This package does **not** include:
 
@@ -27,6 +28,42 @@ src/
   events.ts
   errors.ts
   client.ts
+  correlation.ts
+```
+
+## Request correlation example
+
+```ts
+import {
+  RequestCorrelator,
+  createSessionPromptEvent,
+  ensureRequestId,
+} from './src/index.js'
+
+const correlator = new RequestCorrelator({ timeoutMs: 30_000 })
+
+const request = ensureRequestId(
+  createSessionPromptEvent({
+    sessionId: 'session-1',
+    nodeId: 'node-a',
+    prompt: 'continue working',
+  }),
+)
+
+const pending = correlator.track(request)
+
+// Later, when a message arrives from the remote node:
+correlator.handle({
+  type: 'session/output',
+  sessionId: 'session-1',
+  nodeId: 'node-a',
+  requestId: request.requestId,
+  chunk: 'done',
+  done: true,
+})
+
+const result = await pending.waitForCompletion()
+console.log(result.finalEvent.type)
 ```
 
 ## Example

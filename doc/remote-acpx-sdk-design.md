@@ -50,6 +50,7 @@ packages/remote-acpx-sdk/
     events.ts
     errors.ts
     client.ts
+    correlation.ts
 ```
 
 ### Module responsibilities
@@ -58,6 +59,7 @@ packages/remote-acpx-sdk/
 - `events.ts`：event serialize / parse / validate helpers
 - `errors.ts`：transport / protocol / validation error classes
 - `client.ts`：最小可用 WebSocket client wrapper
+- `correlation.ts`：`requestId` 生成、matching、pending request tracking、timeout/cancel helpers
 - `index.ts`：公開 API 匯出
 
 ---
@@ -97,7 +99,7 @@ BaseEvent
 - `type`: event 種類
 - `sessionId`: 遠端 session 識別碼
 - `nodeId`: 目標或來源 Node
-- `requestId`: 用於追蹤 request/response 關聯
+- `requestId`: 用於追蹤 request/response 關聯；建議所有由 Gateway 主動發出的 request event 都必帶，且 Node 回傳的 `session/output` / `session/error` / `session/end` 應原樣回帶
 - `ts`: event 建立時間
 - `version`: 協議版本，可作為未來擴充用途
 
@@ -229,6 +231,35 @@ RemoteAcpxEvent =
 - `ValidationError`：收到欄位缺失或型別不符的 payload
 
 ---
+
+## Correlation Helpers (v1.1)
+
+除了基本 event contract，SDK 也應提供 request/response 配對能力，避免同一個 `sessionId` 內多個 prompt 並行時發生 stream 混線。
+
+### Recommended helper surface
+
+```text
+createRequestId(prefix?)
+ensureRequestId(event)
+withRequestId(event, requestId?)
+getCorrelationKey(event)
+matchesRequest(event, selector)
+RequestCorrelator
+  - track(request, { timeoutMs? })
+  - handle(event)
+  - has(requestId)
+  - getPending(requestId)
+  - clear(reason?)
+```
+
+### Expected behavior
+
+- 每筆 outbound request 在送出前都應有唯一 `requestId`
+- `RequestCorrelator.track()` 會建立 pending request handle
+- `session/output` 會依相同 `requestId` 聚合 streaming chunks
+- `session/output(done=true)` 或 `session/end` 會 resolve 該 request
+- `session/error` 會 reject 該 request
+- timeout / cancel / clear 都應能安全結束 pending request
 
 ## Client API (v1)
 
