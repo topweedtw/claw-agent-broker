@@ -12,14 +12,14 @@
 
 | # | 元件 | 類別 | 官方支援 | 完成狀態 |
 |---|------|------|----------|----------|
-| 1 | `remote-acpx plugin-sdk` | SDK / 型別定義 | ❌ 無 | 🔴 未開發 |
+| 1 | `remote-acpx plugin-sdk` | SDK / 型別定義 | ❌ 無 | ✅ MVP 已完成 |
 | 2 | `node-host` ACP 事件轉發擴充 | Node 端 WebSocket | ✅ 基底有 | 🔴 未開發 |
 | 3 | `gateway` ACP 事件路由擴充 | Gateway 端路由 | ✅ 基底有 | 🔴 未開發 |
 | 4 | `remote-acpx plugin` | Agent Tool | ❌ 無 | 🔴 未開發 |
 | 5 | `ACP skill` | Agent Skill | ❌ 無 | 🔴 未開發 |
 
 > [!IMPORTANT]
-> 以上五個元件目前均無任何程式碼，需從頭規劃實作。
+> `remote-acpx-sdk`（Phase 1）已完成 MVP、測試與文件；Phase 2–5 仍待實作與整合。
 
 ---
 
@@ -49,13 +49,28 @@ OpenClaw Node (Mac Mini / Mini PC)
 
 ---
 
-### Phase 1 — SDK 與型別定義
+### Phase 1 — SDK 與型別定義（✅ 核心已完成）
 
 #### [NEW] `packages/remote-acpx-sdk/`
 
 **目標**：仿照官方 `acpx plugin-sdk`，定義遠端 ACP 事件的介面、型別、與工廠方法，供後續所有元件共用。
 
 **設計文件**：詳見 `doc/remote-acpx-sdk-design.md`
+
+**目前狀態**：✅ 已完成可用的 MVP foundation，可作為 Phase 2 / Phase 3 的共用基礎。
+
+**已完成內容（截至 2026-04-07）**：
+
+| 項目 | 狀態 |
+|------|------|
+| `types.ts` | ✅ 已完成基本事件型別與 factory helpers |
+| `events.ts` | ✅ 已完成 JSON serialize / parse / validate / type guards |
+| `client.ts` | ✅ 已完成基本 WS client 與 connection lifecycle |
+| `errors.ts` | ✅ 已完成基礎錯誤型別 |
+| `correlation.ts` | ✅ 已完成 `requestId` / `RequestCorrelator` 配對能力 |
+| `test/*.test.cjs` | ✅ 已完成 smoke + lifecycle + correlation 測試 |
+
+**驗證結果**：`npm run check` 與 `npm run test` 已通過（目前 19 tests pass, 0 fail）。
 
 **需實作內容**：
 
@@ -299,7 +314,13 @@ claw-agent-broker/
 │   │   │   ├── events.ts
 │   │   │   ├── client.ts
 │   │   │   ├── errors.ts
+│   │   │   ├── correlation.ts
 │   │   │   └── index.ts
+│   │   ├── test/
+│   │   │   ├── events.test.cjs
+│   │   │   ├── client.test.cjs
+│   │   │   ├── smoke.test.cjs
+│   │   │   └── correlation.test.cjs
 │   │   ├── package.json
 │   │   └── tsconfig.json
 │   │
@@ -369,10 +390,11 @@ claw-agent-broker/
 ## 開發優先順序與里程碑
 
 ```
-Week 1-2: Phase 1 (SDK)
+Week 1-2: Phase 1 (SDK) ✅ 已完成 MVP
   ✦ 定義所有 ACP 事件型別
-  ✦ 實作序列化/反序列化
-  ✦ 基礎 WS client 介面
+  ✦ 實作序列化/反序列化與驗證
+  ✦ 基礎 WS client 介面與 connection lifecycle
+  ✦ 補上 request correlation 與 smoke / unit tests
 
 Week 3-4: Phase 2 (Node Host Ext)
   ✦ WebSocket relay + 重連機制

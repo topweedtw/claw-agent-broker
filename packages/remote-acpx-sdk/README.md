@@ -2,6 +2,8 @@
 
 Shared protocol and transport helpers for remote ACP session events.
 
+- Traditional Chinese README: [`README.zh-TW.md`](./README.zh-TW.md)
+
 ## Scope
 
 This package provides:
