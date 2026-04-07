@@ -1,6 +1,6 @@
 # CLI stdio 協議參考文件
 
-本文件說明 **Claude Code**、**Kiro CLI** 與 **Gemini CLI** 透過 stdin/stdout 進行程式化通訊的協議格式，作為 `node-host-ext` 中 CLI Adapter 開發的技術依據。
+本文件說明 **Claude Code**、**Kiro CLI**、**Gemini CLI** 與 **OpenAI Codex CLI** 透過 stdin/stdout 進行程式化通訊的協議格式，作為 `node-host-ext` 中 CLI Adapter 開發的技術依據。
 
 ---
 
@@ -605,7 +605,202 @@ Client (node-host-ext)          Gemini CLI (subprocess)
 
 ---
 
-## 四、CLI Adapter 實作要點
+## 四、OpenAI Codex CLI — 雙模式協議
+
+### 概述
+
+OpenAI Codex CLI 同樣提供兩種程式化通訊模式：
+
+1. **`codex exec --json`**（Headless）：NDJSON 事件串流，適合 CI/CD 與單次任務自動化
+2. **`codex app-server`**（App Server）：JSON-RPC 2.0 over stdio，供 IDE 擴充套件與深度整合使用，VS Code 官方擴充即使用此模式
+
+- **GitHub**：[openai/codex](https://github.com/openai/codex)（開源，Apache-2.0）
+- **官方文件**：[developers.openai.com/codex](https://developers.openai.com/codex)
+
+> ℹ️ **ACP 支援現況**：Codex CLI 目前**並未實作標準 ACP 協議**（無 `--experimental-acp` 旗標）。它使用自有的 `app-server` JSON-RPC 協議，語意與 ACP 相似但格式不同。
+
+---
+
+### 模式一：`codex exec --json`（Headless NDJSON）
+
+#### 啟動方式
+
+```bash
+# 基本 headless 執行（NDJSON 串流輸出）
+codex exec --json "你的任務描述"
+
+# 允許全自動執行（不需確認）
+codex exec --json --full-auto "重構 auth.ts"
+
+# 指定更寬的 sandbox 權限
+codex exec --json --sandbox danger-full-access "執行測試套件"
+
+# 儲存最終訊息到檔案
+codex exec --json "分析這個 repo" -o result.txt
+
+# 強制結構化 JSON 輸出
+codex exec --json "列出所有函式名稱" \
+  --output-schema ./schema.json
+
+# CI/CD 環境使用 API key
+CODEX_API_KEY="sk-..." codex exec --json --full-auto "task"
+```
+
+#### stdout NDJSON 事件格式
+
+每行一個 JSON 物件，透過 `method` 欄位區分類型（注意：使用 `method` 而非 `type`）。
+
+**`turn/started` — Turn 開始**
+```json
+{"method":"turn/started","params":{"turn":{"id":"turn_abc123","status":"inProgress"}}}
+```
+
+**`item/started` — Item 開始（Agent 訊息、工具呼叫等）**
+```json
+{"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_1"}}}
+```
+
+**`item/agentMessage/delta` — Agent 訊息增量 chunk**
+```json
+{"method":"item/agentMessage/delta","params":{"itemId":"msg_1","delta":"正在分析程式碼結構..."}}
+```
+
+**`item/completed` — Item 完成**
+```json
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_1","text":"分析完成，已找到 3 個潛在問題。"}}}
+```
+
+**`turn/completed` — Turn 結束**
+```json
+{"method":"turn/completed","params":{"turn":{"id":"turn_abc123","status":"completed","usage":{"inputTokens":1200,"outputTokens":450}}}}
+```
+
+#### 使用 jq 取出純文字
+
+```bash
+codex exec --json "解釋這個函式" \
+  | jq -rj 'select(.method=="item/agentMessage/delta") | .params.delta'
+```
+
+#### 退出碼（Exit Codes）
+
+| 退出碼 | 說明 |
+|--------|------|
+| `0` | 成功 |
+| `1` | 一般錯誤 |
+| `2` | 認證失敗 |
+| `4` | Model / API 錯誤 |
+
+---
+
+### 模式二：`codex app-server`（JSON-RPC 2.0 over stdio）
+
+#### 概述與架構
+
+`app-server` 是一個長生命週期的 JSON-RPC 2.0 server，解耦 agent 核心邏輯與 UI 客戶端。VS Code 官方 Codex 擴充套件即使用此模式。
+
+核心概念：
+- **Thread**：一段使用者與 agent 的對話
+- **Turn**：一次使用者請求 + agent 的所有工作序列
+- **Item**：最小輸入/輸出單位（user message、agent message、tool call、file change 等）
+
+#### 啟動方式
+
+```bash
+# 啟動 app-server（stdio 模式，預設）
+codex app-server
+
+# WebSocket 模式（實驗性）
+codex app-server --listen ws://127.0.0.1:9000
+
+# 產生 TypeScript schema（版本配對）
+codex app-server generate-ts
+codex app-server generate-json-schema
+```
+
+#### 通訊流程
+
+```
+Client (node-host-ext)          Codex app-server (subprocess)
+        │                               │
+        │ ── initialize ──────────────> │  建立連線，交換能力
+        │ <── result ─────────────────  │
+        │ ── initialized（通知）───────> │  完成握手
+        │                               │
+        │ ── thread/start ────────────> │  建立新 Thread
+        │ <── result (threadId) ──────  │
+        │                               │
+        │ ── turn/start ──────────────> │  開始一個 Turn（含 prompt）
+        │ <── item/started (stream) ──  │  streaming 事件（多次）
+        │ <── item/agentMessage/delta   │  Agent 文字 chunk
+        │ <── turn/completed ─────────  │  Turn 結束
+```
+
+> ⚠️ **格式特殊性**：wire 上的訊息**省略 `"jsonrpc": "2.0"` 欄位**，直接發送 `{"id":...,"method":...,"params":{...}}`。
+
+#### 訊息格式
+
+**`initialize` — 初始化（建立連線後立即發送）：**
+```json
+{"id":0,"method":"initialize","params":{"clientInfo":{"name":"claw-agent-broker","version":"0.1.0"}}}
+```
+
+**Response：**
+```json
+{"id":0,"result":{"serverInfo":{"name":"codex-app-server","version":"0.118.0"}}}
+```
+
+**`initialized` — 握手完成（Notification，無 id）：**
+```json
+{"method":"initialized","params":{}}
+```
+
+**`thread/start` — 建立新對話 Thread：**
+```json
+{"id":1,"method":"thread/start","params":{"cwd":"/home/user/project"}}
+```
+
+**Response：**
+```json
+{"id":1,"result":{"threadId":"thread_xyz789"}}
+```
+
+**`turn/start` — 開始一個 Turn（傳送 prompt）：**
+```json
+{
+  "id":2,
+  "method":"turn/start",
+  "params":{
+    "threadId":"thread_xyz789",
+    "userMessage":"幫我重構 auth.ts，使用 dependency injection"
+  }
+}
+```
+
+**（過程中 streaming 事件）：**
+```json
+{"method":"item/started","params":{"item":{"type":"agentMessage","id":"msg_1"}}}
+{"method":"item/agentMessage/delta","params":{"itemId":"msg_1","delta":"我來分析 auth.ts..."}}
+{"method":"item/completed","params":{"item":{"type":"agentMessage","id":"msg_1","text":"分析完成..."}}} 
+{"method":"turn/completed","params":{"turn":{"id":"turn_abc","status":"completed"}}}
+```
+
+**`thread/resume` — 恢復既有 Thread：**
+```json
+{"id":3,"method":"thread/resume","params":{"threadId":"thread_xyz789","cwd":"/home/user/project"}}
+```
+
+#### 錯誤碼
+
+| 錯誤碼 | 說明 |
+|--------|------|
+| `-32001` | Server 超載（WebSocket 模式），應指數退避重試 |
+| `-32600` | 無效請求 |
+| `-32601` | 方法不存在 |
+
+---
+
+## 五、CLI Adapter 實作要點
 
 ### Claude Code Adapter
 
@@ -733,27 +928,97 @@ send('session/new', { cwd: workdir, mcpServers: [] })
 send('session/prompt', { sessionId, message: { role: 'user', content: prompt } })
 ```
 
+### Codex CLI Adapter（`codex exec` Headless 模式）
+
+```typescript
+// 啟動 Codex CLI headless process
+const proc = spawn('codex', [
+  'exec',
+  '--json',
+  '--full-auto',
+  prompt,
+], {
+  cwd: workdir,
+  env: { ...process.env, CODEX_API_KEY: '...' },
+  stdio: ['pipe', 'pipe', 'pipe'],
+})
+
+// 讀取 NDJSON 事件串流（method 欄位，非 type）
+let buffer = ''
+proc.stdout.on('data', (chunk) => {
+  buffer += chunk.toString()
+  const lines = buffer.split('\n')
+  buffer = lines.pop() ?? ''
+  for (const line of lines) {
+    if (!line.trim()) continue
+    const event = JSON.parse(line)
+    switch (event.method) {
+      case 'item/agentMessage/delta':
+        onChunk(event.params.delta)
+        break
+      case 'item/completed':
+        if (event.params.item.type === 'agentMessage')
+          onComplete(event.params.item.text)
+        break
+      case 'turn/completed':
+        onTurnEnd(event.params.turn)
+        break
+    }
+  }
+})
+
+proc.on('close', (code) => {
+  if (code !== 0) onError(`codex exited with code ${code}`)
+})
+```
+
+### Codex CLI Adapter（`app-server` 模式）
+
+```typescript
+// 啟動 Codex app-server process
+const proc = spawn('codex', ['app-server'], {
+  cwd: workdir,
+  stdio: ['pipe', 'pipe', 'pipe'],
+})
+
+let requestId = 0
+const send = (method: string, params: object, withId = true) => {
+  const msg: any = { method, params }  // 注意：省略 jsonrpc 欄位！
+  if (withId) msg.id = ++requestId
+  proc.stdin.write(JSON.stringify(msg) + '\n')
+  return msg.id
+}
+
+// 初始化握手
+send('initialize', { clientInfo: { name: 'claw-agent-broker', version: '0.1.0' } })
+// 等待 result 後發送 initialized notification
+send('initialized', {}, false)  // no id = notification
+// 建立 Thread
+send('thread/start', { cwd: workdir })
+// 等待 threadId 後開始 Turn
+send('turn/start', { threadId, userMessage: prompt })
+// 等待 turn/completed 事件
+```
+
 ---
 
-## 五、三者差異對照
+## 六、五者差異對照
 
-| 比較項目 | Claude Code | Kiro CLI | Gemini CLI (Headless) | Gemini CLI (ACP) |
-|----------|-------------|----------|-----------------------|------------------|
-| 協議 | 自訂 NDJSON stream | ACP JSON-RPC 2.0 | 自訂 NDJSON stream | ACP JSON-RPC 2.0 |
-| 傳輸 | NDJSON over stdio | JSON-RPC over stdio | NDJSON over stdio | JSON-RPC over stdio |
-| 啟動旗標 | `--output-format stream-json` | `kiro-cli acp` | `--output-format json-stream` | `--experimental-acp` |
-| Session 建立 | `--resume <id>` flag | `session/new` method | 自動（依 cwd）| `session/new` method |
-| Streaming | `stream_event` 事件 | `session/update` notification | `message` 事件 | `session/update` notification |
-| 取消執行 | 關閉 stdin / kill process | `session/cancel` | kill process | `session/cancel` |
-| 工具授權 | `--allowedTools` flag | `session/request_permission` | `--approval-mode yolo` | 待確認 |
-| 工作目錄 | `cwd` 環境 / `--add-dir` | `session/new.cwd` | spawn 時的 `cwd` | `session/new.cwd` |
-| 標準化程度 | Anthropic 自有格式 | 業界開放標準 ACP | Google 自有格式 | 業界開放標準 ACP |
-| 認證方式 | `ANTHROPIC_API_KEY` env | `kiro-cli login` | Google 帳號快取 | Google 帳號快取 |
-| 開源 | ❌ 閉源 | ❌ 閉源 | ✅ 開源 |  ✅ 開源 |
+| 比較項目 | Claude Code | Kiro CLI | Gemini CLI (Headless) | Gemini CLI (ACP) | Codex (exec) | Codex (app-server) |
+|----------|-------------|----------|-----------------------|------------------|--------------|-------------------|
+| 協議 | 自訂 NDJSON | ACP JSON-RPC 2.0 | 自訂 NDJSON | ACP JSON-RPC 2.0 | 自訂 NDJSON | 自訂 JSON-RPC 2.0 |
+| 啟動旗標 | `claude -p` | `kiro-cli acp` | `gemini -p` | `gemini --experimental-acp` | `codex exec --json` | `codex app-server` |
+| ACP 相容 | ❌ | ✅ 標準 ACP | ❌ | ✅ 標準 ACP | ❌ | ❌（自有格式） |
+| Session 單元 | session（`--resume`） | ACP session | 自動（依 cwd） | ACP session | Turn（無 session） | Thread + Turn |
+| Streaming 格式 | `type: stream_event` | `session/update` notification | `type: message` | `session/update` notification | `method: item/agentMessage/delta` | `method: item/agentMessage/delta` |
+| 工具授權 | `--allowedTools` | `session/request_permission` | `--approval-mode` | 待確認 | `--full-auto` / `--sandbox` | 內建 approval 流程 |
+| jsonrpc 欄位 | N/A | 有 | N/A | 有 | N/A | **省略**（特殊！） |
+| 認證 | `ANTHROPIC_API_KEY` | `kiro-cli login` | Google 帳號 | Google 帳號 | `CODEX_API_KEY` | `CODEX_API_KEY` |
+| 開源 | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 ---
 
-## 六、參考資源
+## 七、參考資源
 
 ### Claude Code
 - [Claude Code CLI Reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference)
@@ -764,6 +1029,10 @@ send('session/prompt', { sessionId, message: { role: 'user', content: prompt } }
 
 ### Gemini CLI
 - [Gemini CLI GitHub](https://github.com/google-gemini/gemini-cli)
+
+### OpenAI Codex CLI
+- [Codex CLI GitHub](https://github.com/openai/codex)
+- [Codex 官方文件](https://developers.openai.com/codex)
 
 ### ACP 協議規格
 - [Agent Client Protocol 官方規格](https://agentclientprotocol.com/protocol/overview)
