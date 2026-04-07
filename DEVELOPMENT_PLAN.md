@@ -129,6 +129,8 @@ interface SessionEndEvent {
 
 **目標**：在 Node 機器上，接收來自 Gateway 的 ACP 事件，並轉送給本機的 coding CLI（stdin），同時將 CLI 輸出（stdout/stderr）回傳給 Gateway。
 
+**傳輸協議**：詳見 `doc/node-gateway-transport-protocol.md`
+
 **需實作內容**：
 
 | 模組 | 說明 |
@@ -169,6 +171,8 @@ Node 啟動
 #### [NEW] `packages/gateway-ext/`
 
 **目標**：在 Gateway 上，將 Agent 發出的 ACP tool call 路由到正確的 Node WebSocket，並將 Node 回傳的事件轉回給 Agent。
+
+**傳輸協議**：詳見 `doc/node-gateway-transport-protocol.md`
 
 **需實作內容**：
 

@@ -70,6 +70,8 @@ packages/remote-acpx-sdk/
 - **Payload format**: JSON
 - **Message model**: one WebSocket message = one event object
 
+> Node ↔ Gateway 的握手、認證、heartbeat、close code 與 request/response 配對規則，另見 `doc/node-gateway-transport-protocol.md`。
+
 ```text
 Gateway
   -- send event -->
