@@ -31,6 +31,8 @@ type ClientEventMap = {
 
 export class RemoteAcpxClient {
   private socket?: RemoteAcpxSocket
+  private isOpen = false
+  private connectPromise?: Promise<void>
   private readonly listeners: {
     [K in keyof ClientEventMap]: Set<(payload: ClientEventMap[K]) => void>
   } = {
@@ -43,31 +45,89 @@ export class RemoteAcpxClient {
   constructor(private readonly options: RemoteAcpxClientOptions) {}
 
   async connect(): Promise<void> {
-    this.socket = this.options.createSocket(this.options.url)
-
-    this.socket.onopen = () => {
-      this.emit('open', undefined)
+    if (this.isOpen) {
+      return
     }
 
-    this.socket.onmessage = (event) => {
-      try {
-        this.emit('message', parseEvent(event.data))
-      } catch (error) {
+    if (this.connectPromise) {
+      return this.connectPromise
+    }
+
+    let socket: RemoteAcpxSocket
+
+    try {
+      socket = this.options.createSocket(this.options.url)
+    } catch (error) {
+      throw new ConnectionError('Failed to create remote ACPX socket', error)
+    }
+
+    this.socket = socket
+
+    this.connectPromise = new Promise<void>((resolve, reject) => {
+      let settled = false
+
+      const rejectConnection = (message: string, details?: unknown) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        this.isOpen = false
+        this.socket = undefined
+        this.connectPromise = undefined
+
+        const error = new ConnectionError(message, details)
         this.emit('error', error)
+        reject(error)
       }
-    }
 
-    this.socket.onerror = (event) => {
-      this.emit('error', event)
-    }
+      socket.onopen = () => {
+        settled = true
+        this.isOpen = true
+        this.connectPromise = undefined
+        this.emit('open', undefined)
+        resolve()
+      }
 
-    this.socket.onclose = (event) => {
-      this.emit('close', event)
-    }
+      socket.onmessage = (event) => {
+        try {
+          this.emit('message', parseEvent(event.data))
+        } catch (error) {
+          this.emit('error', error)
+        }
+      }
+
+      socket.onerror = (event) => {
+        if (!settled) {
+          rejectConnection('Failed to open remote ACPX socket', event)
+          return
+        }
+
+        this.emit('error', event)
+      }
+
+      socket.onclose = (event) => {
+        const wasOpen = this.isOpen
+        this.isOpen = false
+        this.socket = undefined
+        this.connectPromise = undefined
+
+        if (!settled) {
+          rejectConnection('RemoteAcpxClient closed before opening', event)
+          return
+        }
+
+        if (wasOpen) {
+          this.emit('close', event)
+        }
+      }
+    })
+
+    return this.connectPromise
   }
 
   send(event: RemoteAcpxEvent): void {
-    if (!this.socket) {
+    if (!this.socket || !this.isOpen) {
       throw new ConnectionError('RemoteAcpxClient is not connected')
     }
 
@@ -86,8 +146,13 @@ export class RemoteAcpxClient {
   }
 
   close(code?: number, reason?: string): void {
-    this.socket?.close(code, reason)
+    const socket = this.socket
+
+    this.isOpen = false
+    this.connectPromise = undefined
     this.socket = undefined
+
+    socket?.close(code, reason)
   }
 
   private emit<K extends keyof ClientEventMap>(eventName: K, payload: ClientEventMap[K]): void {

@@ -17,6 +17,14 @@ class MockSocket {
     this.onclose = undefined
   }
 
+  open() {
+    this.onopen && this.onopen()
+  }
+
+  fail(error = new Error('socket error')) {
+    this.onerror && this.onerror(error)
+  }
+
   send(data) {
     this.sent.push(data)
   }
@@ -45,6 +53,39 @@ test('send throws before connect', () => {
   )
 })
 
+test('connect resolves only after the socket opens', async () => {
+  const socket = new MockSocket()
+  const client = new RemoteAcpxClient({
+    url: 'ws://example.test',
+    createSocket: () => socket,
+  })
+
+  let resolved = false
+  const connectPromise = client.connect().then(() => {
+    resolved = true
+  })
+
+  await Promise.resolve()
+  assert.equal(resolved, false)
+
+  socket.open()
+  await connectPromise
+  assert.equal(resolved, true)
+})
+
+test('connect rejects when the socket errors before opening', async () => {
+  const socket = new MockSocket()
+  const client = new RemoteAcpxClient({
+    url: 'ws://example.test',
+    createSocket: () => socket,
+  })
+
+  const connectPromise = client.connect()
+  socket.fail(new Error('boom'))
+
+  await assert.rejects(connectPromise, ConnectionError)
+})
+
 test('client sends serialized events and emits parsed messages', async () => {
   const socket = new MockSocket()
   const client = new RemoteAcpxClient({
@@ -57,7 +98,9 @@ test('client sends serialized events and emits parsed messages', async () => {
     received.push(event)
   })
 
-  await client.connect()
+  const connectPromise = client.connect()
+  socket.open()
+  await connectPromise
 
   const outbound = createSessionPromptEvent({
     sessionId: 'session-1',

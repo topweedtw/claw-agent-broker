@@ -36,7 +36,9 @@ test('smoke flow covers new -> prompt -> output -> end', async () => {
     received.push(event)
   })
 
-  await client.connect()
+  const connectPromise = client.connect()
+  socket.onopen()
+  await connectPromise
 
   client.send(
     createSessionNewEvent({
