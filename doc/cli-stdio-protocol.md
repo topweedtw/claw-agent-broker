@@ -1,6 +1,6 @@
 # CLI stdio 協議參考文件
 
-本文件說明 **Claude Code** 與 **Kiro CLI** 透過 stdin/stdout 進行程式化通訊的協議格式，作為 `node-host-ext` 中 CLI Adapter 開發的技術依據。
+本文件說明 **Claude Code**、**Kiro CLI** 與 **Gemini CLI** 透過 stdin/stdout 進行程式化通訊的協議格式，作為 `node-host-ext` 中 CLI Adapter 開發的技術依據。
 
 ---
 
@@ -397,7 +397,215 @@ Kiro 在標準 ACP 之上加入了自訂擴充，使用 `_kiro.dev/` 前綴：
 
 ---
 
-## 三、CLI Adapter 實作要點
+## 三、Gemini CLI — 雙模式協議
+
+### 概述
+
+Gemini CLI 提供兩種程式化通訊模式：
+
+1. **Headless 模式**（`--output-format json-stream`）：NDJSON 串流，適合單次任務自動化
+2. **ACP 模式**（`--experimental-acp`）：標準 ACP JSON-RPC 2.0 協議，適合 IDE 整合與持續 session 管理
+
+- **GitHub**：[google-gemini/gemini-cli](https://github.com/google-gemini/gemini-cli)
+- **ACP 規格**：[agentclientprotocol.com](https://agentclientprotocol.com)
+
+---
+
+### 模式一：Headless json-stream 模式
+
+#### 啟動方式
+
+```bash
+# 基本 headless 模式（NDJSON 輸出）
+gemini -p "你的 prompt" --output-format json-stream
+
+# 完整單次 JSON 輸出（含 metadata）
+gemini -p "prompt" --output-format json
+
+# Pipe 方式傳入 stdin
+cat file.ts | gemini -p "分析這段程式碼"
+
+# 自動核准所有工具（headless 必要）
+gemini -p "prompt" --approval-mode yolo
+
+# 指定 approval 模式
+gemini -p "prompt" --approval-mode auto_edit   # 自動核准檔案編輯
+gemini -p "prompt" --approval-mode plan        # 唯讀規劃模式
+```
+
+#### stdout 輸出事件格式（NDJSON，每行一個 JSON）
+
+**`init` — Session 初始化**
+```json
+{
+  "type": "init",
+  "sessionId": "gemini-session-abc123",
+  "model": "gemini-2.5-pro"
+}
+```
+
+**`message` — 內容 chunk**
+```json
+{
+  "type": "message",
+  "content": "好的，我來分析這段程式碼..."
+}
+```
+
+**`tool_use` — 工具呼叫**
+```json
+{
+  "type": "tool_use",
+  "tool": "read_file",
+  "input": {
+    "path": "/home/user/project/auth.ts"
+  }
+}
+```
+
+**`tool_result` — 工具執行結果**
+```json
+{
+  "type": "tool_result",
+  "tool": "read_file",
+  "output": "import { ... } from ..."
+}
+```
+
+**`error` — 非致命錯誤（警告）**
+```json
+{
+  "type": "error",
+  "message": "Rate limit approaching"
+}
+```
+
+**`result` — 最終結果（最後一條）**
+```json
+{
+  "type": "result",
+  "response": "完整的最終回應文字",
+  "stats": {
+    "inputTokens": 1200,
+    "outputTokens": 450,
+    "latencyMs": 3200
+  }
+}
+```
+
+#### 取出純文字的 jq 指令
+
+```bash
+gemini -p "解釋這個函式" --output-format json-stream \
+  | jq -rj 'select(.type == "message") | .content'
+```
+
+#### 退出碼（Exit Codes）
+
+| 退出碼 | 說明 |
+|--------|------|
+| `0` | 成功 |
+| `1` | 一般錯誤 / API 失敗 |
+| `42` | 輸入錯誤（無效 prompt 或參數）|
+| `53` | 超過 turn 限制 |
+
+---
+
+### 模式二：ACP 模式（`--experimental-acp`）
+
+#### 啟動方式
+
+```bash
+# 啟動 ACP 模式（subprocess 方式）
+gemini --experimental-acp
+```
+
+> ⚠️ **注意**：必須使用完整的 `--experimental-acp` 旗標，不能縮寫為 `--acp`。
+> 認證依賴本機已快取的 Google 帳號憑證（`google_accounts.json`），確保環境變數正確繼承。
+
+#### ACP 通訊流程（與 Kiro 相同標準）
+
+```
+Client (node-host-ext)          Gemini CLI (subprocess)
+        │                               │
+        │ ── initialize ──────────────> │  建立連線，交換能力
+        │ <── result (capabilities) ─── │
+        │                               │
+        │ ── session/new ─────────────> │  建立新 session
+        │ <── result (sessionId) ─────  │
+        │                               │
+        │ ── session/prompt ──────────> │  傳送使用者 prompt
+        │ <── session/update (stream) ─ │  streaming 回傳（多次）
+        │ <── result (stop_reason) ──── │  prompt turn 結束
+```
+
+#### 訊息格式（JSON-RPC 2.0，與 Kiro ACP 相容）
+
+**`initialize` — 初始化：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 0,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": 1,
+    "clientInfo": {
+      "name": "claw-agent-broker",
+      "version": "0.1.0"
+    }
+  }
+}
+```
+
+**`session/new` — 建立 Session：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/new",
+  "params": {
+    "cwd": "/home/user/project",
+    "mcpServers": []
+  }
+}
+```
+
+**`session/prompt` — 傳送 Prompt：**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/prompt",
+  "params": {
+    "sessionId": "sess_gemini_abc123",
+    "message": {
+      "role": "user",
+      "content": "幫我寫這個功能的單元測試"
+    }
+  }
+}
+```
+
+#### 注意事項（Headless 特有問題）
+
+- **工具確認掛起**：若工具需使用者確認而無回應，process 會無限等待。ACP 模式下應確認工具授權設定。
+- **Session 自動持久化**：Gemini CLI 會依當前工作目錄自動建立/恢復 session，不需要額外的 `--resume` 旗標。
+- **ACP 為 Experimental**：功能可能隨版本變動，建議定期確認 changelog。
+
+#### IDE 整合設定範例（JetBrains）
+
+```json
+// ~/.jetbrains/acp.json
+{
+  "command": "gemini",
+  "args": ["--experimental-acp"],
+  "env": {}
+}
+```
+
+---
+
+## 四、CLI Adapter 實作要點
 
 ### Claude Code Adapter
 
@@ -461,29 +669,104 @@ send('session/new', { cwd: workdir, mcpServers: [] })
 send('session/prompt', { sessionId, message: { role: 'user', content: prompt } })
 ```
 
+### Gemini CLI Adapter（Headless 模式）
+
+```typescript
+// 啟動 Gemini CLI headless process
+const proc = spawn('gemini', [
+  '-p', prompt,
+  '--output-format', 'json-stream',
+  '--approval-mode', 'yolo',
+], {
+  cwd: workdir,
+  env: { ...process.env },
+  stdio: ['pipe', 'pipe', 'pipe'],
+})
+
+// 讀取 NDJSON streaming 輸出
+let buffer = ''
+proc.stdout.on('data', (chunk) => {
+  buffer += chunk.toString()
+  const lines = buffer.split('\n')
+  buffer = lines.pop() ?? ''
+  for (const line of lines) {
+    if (!line.trim()) continue
+    const event = JSON.parse(line)
+    if (event.type === 'message') {
+      // 串流輸出 chunk
+      onChunk(event.content)
+    } else if (event.type === 'result') {
+      // 最終結果
+      onComplete(event.response)
+    } else if (event.type === 'error') {
+      onError(event.message)
+    }
+  }
+})
+
+// 監控退出碼
+proc.on('close', (code) => {
+  if (code !== 0) onError(`gemini exited with code ${code}`)
+})
+```
+
+### Gemini CLI Adapter（ACP 模式）
+
+```typescript
+// 啟動 Gemini CLI ACP process（與 Kiro 邏輯相同）
+const proc = spawn('gemini', ['--experimental-acp'], {
+  cwd: workdir,
+  stdio: ['pipe', 'pipe', 'pipe'],
+})
+
+let requestId = 0
+const send = (method: string, params: object, expectResponse = true) => {
+  const msg: any = { jsonrpc: '2.0', method, params }
+  if (expectResponse) msg.id = ++requestId
+  proc.stdin.write(JSON.stringify(msg) + '\n')
+  return msg.id
+}
+
+// 與 Kiro ACP 相同的初始化流程
+send('initialize', { protocolVersion: 1, clientInfo: { name: 'claw-agent-broker', version: '0.1.0' } })
+send('session/new', { cwd: workdir, mcpServers: [] })
+send('session/prompt', { sessionId, message: { role: 'user', content: prompt } })
+```
+
 ---
 
-## 四、兩者差異對照
+## 五、三者差異對照
 
-| 比較項目 | Claude Code | Kiro CLI |
-|----------|-------------|----------|
-| 協議 | 自訂 NDJSON stream | ACP（JSON-RPC 2.0）|
-| 傳輸 | NDJSON over stdio | JSON-RPC over stdio |
-| Session 建立 | `--resume <sessionId>` flag | `session/new` method |
-| Streaming | `stream_event` 事件 | `session/update` notification |
-| 取消執行 | 關閉 stdin / kill process | `session/cancel` notification |
-| 工具授權 | `--allowedTools` flag | `session/request_permission` method call |
-| 工作目錄 | `cwd` 環境 / `--add-dir` | `session/new.cwd` 參數 |
-| 標準化程度 | Anthropic 自有格式 | 業界開放標準 ACP |
+| 比較項目 | Claude Code | Kiro CLI | Gemini CLI (Headless) | Gemini CLI (ACP) |
+|----------|-------------|----------|-----------------------|------------------|
+| 協議 | 自訂 NDJSON stream | ACP JSON-RPC 2.0 | 自訂 NDJSON stream | ACP JSON-RPC 2.0 |
+| 傳輸 | NDJSON over stdio | JSON-RPC over stdio | NDJSON over stdio | JSON-RPC over stdio |
+| 啟動旗標 | `--output-format stream-json` | `kiro-cli acp` | `--output-format json-stream` | `--experimental-acp` |
+| Session 建立 | `--resume <id>` flag | `session/new` method | 自動（依 cwd）| `session/new` method |
+| Streaming | `stream_event` 事件 | `session/update` notification | `message` 事件 | `session/update` notification |
+| 取消執行 | 關閉 stdin / kill process | `session/cancel` | kill process | `session/cancel` |
+| 工具授權 | `--allowedTools` flag | `session/request_permission` | `--approval-mode yolo` | 待確認 |
+| 工作目錄 | `cwd` 環境 / `--add-dir` | `session/new.cwd` | spawn 時的 `cwd` | `session/new.cwd` |
+| 標準化程度 | Anthropic 自有格式 | 業界開放標準 ACP | Google 自有格式 | 業界開放標準 ACP |
+| 認證方式 | `ANTHROPIC_API_KEY` env | `kiro-cli login` | Google 帳號快取 | Google 帳號快取 |
+| 開源 | ❌ 閉源 | ❌ 閉源 | ✅ 開源 |  ✅ 開源 |
 
 ---
 
-## 五、參考資源
+## 六、參考資源
 
+### Claude Code
 - [Claude Code CLI Reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference)
 - [Claude Code Programmatic Usage](https://docs.anthropic.com/en/docs/claude-code/headless)
+
+### Kiro CLI
+- [Kiro CLI 官方文件](https://kiro.dev)
+
+### Gemini CLI
+- [Gemini CLI GitHub](https://github.com/google-gemini/gemini-cli)
+
+### ACP 協議規格
 - [Agent Client Protocol 官方規格](https://agentclientprotocol.com/protocol/overview)
 - [ACP Session Setup](https://agentclientprotocol.com/protocol/session-setup)
 - [ACP Prompt Turn](https://agentclientprotocol.com/protocol/prompt-turn)
 - [ACP Schema](https://agentclientprotocol.com/protocol/schema)
-- [Kiro CLI 官方文件](https://kiro.dev)
