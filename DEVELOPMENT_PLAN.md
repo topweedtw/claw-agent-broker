@@ -55,6 +55,8 @@ OpenClaw Node (Mac Mini / Mini PC)
 
 **目標**：仿照官方 `acpx plugin-sdk`，定義遠端 ACP 事件的介面、型別、與工廠方法，供後續所有元件共用。
 
+**設計文件**：詳見 `doc/remote-acpx-sdk-design.md`
+
 **需實作內容**：
 
 | 項目 | 說明 |
